@@ -1,0 +1,49 @@
+* ~immumap~: Immutable Dictionary
+
+~immumap~ fast python extension of an immutable *Hash Array Mapped
+Trie*. Build with *C++20 and pybin11*. It provides the safety of
+functional data structures with the performance of near $O(1)$
+operations through structural sharing.
+
+* Key Features
+
+- Efficient lookups O(log32 N)
+- Low memory
+- C++20
+- Native Json serialization
+- Thread safety
+
+* API Reference
+
+```python
+import immumap._core as immumap
+
+# Initialize and set
+m = immumap.Map().set("key", "value")
+m2 = m.set("pi", 3.14)
+
+print(m)   # Map({'key': 'value'})
+print(m2)  # Map({'key': 'value', 'pi': 3.14})
+
+# Standard access
+val = m2["pi"]    # 3.14
+size = len(m2)    # 2
+exists = "pi" in m2 # True
+
+# Update from a standard Python dictionary
+m3 = m2.update({"a": 1, "b": 2, "c": 3})
+
+# Native JSON string conversion
+json_output = m3.to_json()
+# {"key":"value","pi":3.14,"a":1,"b":2,"c":3}
+
+
+# Start a mutation context
+mut = m3.mutate()
+
+for i in range(1000):
+    mut.set(f"item_{i}", i)
+
+# Freeze the result into a new immutable Map
+m_final = mut.finish()
+```
