@@ -15,7 +15,7 @@ operations through structural sharing.
 
 * API Reference
 
-```python
+#+begin_src python
 import immumap._core as immumap
 
 # Initialize and set
@@ -46,4 +46,4 @@ for i in range(1000):
 
 # Freeze the result into a new immutable Map
 m_final = mut.finish()
-```
+#+end_src
