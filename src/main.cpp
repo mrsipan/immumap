@@ -5,11 +5,10 @@
 #include <bit>
 #include <memory>
 #include <sstream>
-#include <optional>
 
 namespace py = pybind11;
 
-// --- Forward Declarations ---
+// --- Data Structures ---
 struct Node;
 using NodePtr = std::shared_ptr<const Node>;
 struct Leaf { py::object key; py::object value; };
@@ -35,7 +34,7 @@ struct Node {
     }
 };
 
-// Unified recursive helper: returns {NewNode, WasAdded}
+// --- Recursive Helper ---
 std::pair<NodePtr, bool> set_rec(NodePtr node, size_t hash, py::object key, py::object val, int shift) {
     if (node->type == NodeType::Collision) {
         auto next_ch = node->children;
@@ -61,9 +60,7 @@ std::pair<NodePtr, bool> set_rec(NodePtr node, size_t hash, py::object key, py::
                 return {Node::make_bitmap(node->bitmap, std::move(next_ch)), false};
             } else {
                 size_t old_hash = py::hash(leaf->key);
-                if (old_hash == hash)
-                    return {Node::make_collision({*leaf, Leaf{key, val}}), true};
-
+                if (old_hash == hash) return {Node::make_collision({*leaf, Leaf{key, val}}), true};
                 auto [sub, _] = set_rec(Node::make_bitmap(0, {}), old_hash, leaf->key, leaf->value, shift + 5);
                 auto [final_sub, added] = set_rec(sub, hash, key, val, shift + 5);
                 auto next_ch = node->children;
@@ -83,6 +80,7 @@ std::pair<NodePtr, bool> set_rec(NodePtr node, size_t hash, py::object key, py::
     }
 }
 
+// --- Map Class ---
 class Map {
     NodePtr root;
     size_t _size;
@@ -109,45 +107,33 @@ public:
     NodePtr get_root() const { return root; }
     size_t size() const { return _size; }
 
-
-    // Inside the Map class in src/main.cpp
-
-py::object get(py::object key, py::handle default_val = py::none()) const {
-    size_t h = py::hash(key);
-    int shift = 0;
-    NodePtr curr = root;
-
-    while (curr) {
-        if (curr->type == NodeType::Collision) {
-            for (auto& e : curr->children)
-                if (std::get<Leaf>(e).key.equal(key)) return std::get<Leaf>(e).value;
-            break;
+    // Internal find logic that returns a pointer (safe)
+    const py::object* find(py::object key) const {
+        size_t h = py::hash(key);
+        int shift = 0;
+        NodePtr curr = root;
+        while (curr) {
+            if (curr->type == NodeType::Collision) {
+                for (auto& e : curr->children)
+                    if (std::get<Leaf>(e).key.equal(key)) return &std::get<Leaf>(e).value;
+                return nullptr;
+            }
+            uint32_t bit = 1u << ((h >> shift) & 0x1f);
+            if (!(curr->bitmap & bit)) return nullptr;
+            auto& entry = curr->children[std::popcount(curr->bitmap & (bit - 1))];
+            if (auto* leaf = std::get_if<Leaf>(&entry)) {
+                if (leaf->key.equal(key)) return &leaf->value;
+                return nullptr;
+            }
+            curr = std::get<NodePtr>(entry);
+            shift += 5;
         }
-        uint32_t bit = 1u << ((h >> shift) & 0x1f);
-        if (!(curr->bitmap & bit)) break;
-
-        auto& entry = curr->children[std::popcount(curr->bitmap & (bit - 1))];
-        if (auto* leaf = std::get_if<Leaf>(&entry)) {
-            if (leaf->key.equal(key)) return leaf->value;
-            break;
-        }
-        curr = std::get<NodePtr>(entry);
-        shift += 5;
+        return nullptr;
     }
-
-    // If we are here, key was not found.
-    // If the call came from __getitem__, we shouldn't have a default provided by pybind's arg.
-    // However, to be safe and Pythonic:
-    if (default_val.is_none()) {
-         throw py::key_error(py::str(key));
-    }
-    return py::reinterpret_borrow<py::object>(default_val);
-}
-
 
     std::shared_ptr<Map> set(py::object k, py::object v) const {
-        auto result = set_rec(root, py::hash(k), k, v, 0);
-        return std::make_shared<Map>(result.first, _size + (result.second ? 1 : 0));
+        auto res = set_rec(root, py::hash(k), k, v, 0);
+        return std::make_shared<Map>(res.first, _size + (res.second ? 1 : 0));
     }
 
     std::string repr() const {
@@ -158,9 +144,9 @@ py::object get(py::object key, py::handle default_val = py::none()) const {
         try {
             while (true) {
                 py::object k = it.next();
-                py::object v = get(k);
+                const py::object* v = find(k);
                 if (!first) ss << ", ";
-                ss << py::repr(k) << ": " << py::repr(v);
+                ss << py::repr(k) << ": " << py::repr(*v);
                 first = false;
             }
         } catch (const py::stop_iteration&) {}
@@ -169,6 +155,7 @@ py::object get(py::object key, py::handle default_val = py::none()) const {
     }
 };
 
+// --- Module ---
 PYBIND11_MODULE(_core, m) {
     py::class_<Map::Iter>(m, "MapIterator")
         .def("__next__", &Map::Iter::next)
@@ -176,29 +163,20 @@ PYBIND11_MODULE(_core, m) {
 
     py::class_<Map, std::shared_ptr<Map>>(m, "Map")
         .def(py::init<>())
-
         .def("set", &Map::set)
-
-        // This version is for m.get(key, default)
-        .def("get", [](const Map& m, py::object key, py::object default_val) {
-            try {
-                return m.get(key);
-            } catch (const py::key_error&) {
-                return default_val;
-            }
+        .def("get", [](const Map& m, py::object key, py::object def_val) {
+            const py::object* val = m.find(key);
+            return val ? *val : def_val;
         }, py::arg("key"), py::arg("default") = py::none())
-
-        .def("__len__", &Map::size)
-
-        // This version is for m[key] - it MUST throw
         .def("__getitem__", [](const Map& m, py::object key) {
-            return m.get(key, py::handle()); // Passing an empty handle to signify "no default"
+            const py::object* val = m.find(key);
+            if (!val) throw py::key_error(py::str(key));
+            return *val;
         })
-
-
         .def("__contains__", [](const Map& m, py::object key) {
-            try { m.get(key); return true; } catch (...) { return false; }
+            return m.find(key) != nullptr;
         })
+        .def("__len__", &Map::size)
         .def("__repr__", &Map::repr)
         .def("__iter__", [](const Map& m) { return Map::Iter(m.get_root()); }, py::keep_alive<0, 1>());
 }
